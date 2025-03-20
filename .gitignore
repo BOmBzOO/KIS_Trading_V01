@@ -19,6 +19,7 @@ build/
 main.exe
 main.spec
 spec.txt
+trading.log
 
 bombzoo_*.yaml
 shinhan_*.yaml

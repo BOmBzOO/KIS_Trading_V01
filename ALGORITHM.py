@@ -1,3 +1,14 @@
+"""
+주식 자동매매 전략을 구현하는 클래스
+실시간 시세 모니터링, 매매 신호 생성, 주문 실행 등의 기능을 담당
+
+주요 기능:
+1. 실시간 시세 모니터링 (호가, 체결, VI)
+2. 매수/매도 신호 생성
+3. 주문 실행 및 상태 관리
+4. 계좌 정보 관리
+"""
+
 import pandas as pd
 import pytz
 import sys
@@ -22,6 +33,21 @@ from utility_multiprocessing import Account_detail, delete_JSON
 logger = logging.getLogger()
 
 class STRATEGY:
+    """
+    주식 매매 전략을 구현하는 클래스
+    
+    Attributes:
+        _info (dict): API 접속 정보 및 계좌 정보
+        _code (str): 종목 코드
+        _l (Logger): 로깅 객체
+        _STOCKS_DIR_PATH (str): 종목 정보 저장 경로
+        _stock_info (dict): 종목별 상세 정보
+        _current_price (int): 현재가
+        _positions (str): 보유 수량
+        _sell_order_hoga (float): 매도 호가
+        _buy_order_hoga (float): 매수 호가
+        _buy_start_time (datetime): 매수 시작 시간
+    """
     def __init__(self, info, code):
         self._info = info
         self._code = code
@@ -33,13 +59,18 @@ class STRATEGY:
         self._sell_order_hoga = float(self._stock_info['sell_price_ori'])
         self._buy_order_hoga = None
         self._buy_start_time = datetime.datetime.strptime(self._stock_info['timepoint_trading_start'], "%Y-%m-%d %H:%M:%S")
-
         
         self._Set_Initial_State()
         # print(self._stock_info['name'], self._stock_info['state'], self._stock_info['positions'], self._positions)
 
 # /... [ Realtime Functions ] .../
     def _Set_Initial_State(self):
+        """
+        초기 상태 설정
+        - 계좌 정보 업데이트
+        - 보유 종목 상태 설정 (매수/매도)
+        - 종목 정보 저장
+        """
         self._Stock_Info_Update_With_Account()
         if self._stock_info['positions'] in ["None","0"]:
             self._stock_info['state'] = 'TO_BUY'
@@ -49,6 +80,12 @@ class STRATEGY:
         self._Write_Stock_Info()
 
     def _Stock_Info_Update_With_Account(self):
+        """
+        계좌 정보를 기반으로 종목 정보 업데이트
+        - 보유 종목 정보 업데이트
+        - 미보유 종목 초기화
+        - 현재가 조회 및 업데이트
+        """
         try:
             res = self._Inquire_Balance()
             if res is not None and int(res['hldg_qty']) > 0:
@@ -57,6 +94,7 @@ class STRATEGY:
                     if item in res:
                         self._stock_info[item] = res[item]
                 
+                # 매도가격 계산 및 상태 업데이트
                 self._stock_info['sell_price_modi'] = math.trunc(float(res['pchs_avg_pric']) * (1 + float(self._stock_info['sell_target_percent'])))
                 self._stock_info['positions'] = int(res['hldg_qty'])
                 self._current_price = int(res['prpr'])
@@ -74,7 +112,7 @@ class STRATEGY:
                     price_res = inquire_price(**self._info, code=self._code)
                     price_data = price_res.json()
                     
-                    # 모의투자와 실전투자 구분
+                    # 모의투자와 실전투자 구분하여 현재가 설정
                     if self._info['ACNT_TYPE'] == 'paper':
                         if 'output' in price_data:
                             self._current_price = int(price_data['output']['stck_prpr'])
@@ -87,6 +125,7 @@ class STRATEGY:
                     self._l.error(f"Price response data: {price_data if 'price_data' in locals() else 'No price data'}")
                     self._current_price = 0
                     
+                # 초기 상태 설정
                 self._stock_info['buy_price_modi'] = self._stock_info['buy_price_ori']
                 self._stock_info['buy_qty_modi'] = self._stock_info['buy_qty_ori']
                 self._sell_order_hoga = int(self._stock_info['sell_price_modi'])
@@ -99,6 +138,16 @@ class STRATEGY:
             self._Send_Message(f"Error updating stock info for {self._code}: {e}")
 
     def _Checkup_Buy_Signal(self):
+        """
+        매수 신호 확인
+        조건:
+        1. 상태가 'TO_BUY'
+        2. 현재가가 목표 매수가 이하
+        3. 매수 시작 시간 이후
+        
+        Returns:
+            bool: 매수 신호 여부
+        """
         t_now = datetime.datetime.now()
         buy_start_time = datetime.datetime.strptime(self._stock_info['timepoint_trading_start'], "%Y-%m-%d %H:%M:%S")
         if ((self._stock_info['state'] == 'TO_BUY') and 
@@ -112,6 +161,16 @@ class STRATEGY:
             return False
 
     def _Checkup_Sell_Signal(self):
+        """
+        매도 신호 확인
+        조건:
+        1. 상태가 'TO_SELL'
+        2. 현재가가 목표 매도가 이상
+        3. 보유 수량이 1주 이상
+        
+        Returns:
+            bool: 매도 신호 여부
+        """
         # self._stock_info["sell_price_modi"]='-1' # 무조건 매도
 
         if ((self._stock_info['state'] == 'TO_SELL') and 
@@ -123,6 +182,15 @@ class STRATEGY:
             return False
     
     def _On_Realtime_Stock_Monitor(self, data):
+        """
+        실시간 시세 모니터링 처리
+        - 호가 정보 처리
+        - 체결 정보 처리
+        - VI 정보 처리
+        
+        Args:
+            data (list): 실시간 데이터
+        """
         tr_id0 = data[1]
         body_data = data[3].split('^')
         if tr_id0 == "H0STASP0":  # [실전/모의투자] 실시간 주식호가
@@ -155,6 +223,22 @@ class STRATEGY:
                 # self._Transition_State("SELL_SUBMITTED")
             else: pass
             # print(self._stock_info['name'], self._stock_info['state'], self._stock_info['positions'], self._positions)
+        elif tr_id0 == "H0STVI0":  # [실전/모의투자] 실시간 VI 정보
+            vi_type = body_data[0]  # VI 종류 (1: 상승, 2: 하락)
+            vi_price = int(body_data[1])  # VI 가격
+            vi_time = body_data[2]  # VI 시간
+            
+            vi_type_str = "상승" if vi_type == "1" else "하락"
+            MESSAGE = f"[VI발동] {self._stock_info['name']} {vi_type_str}VI 발동 - 가격: {vi_price}원"
+            self._Send_Message(msg=MESSAGE)
+            
+            # VI 발동 시 상태 업데이트
+            if vi_type == "1":  # 상승VI
+                self._stock_info['buy_price_modi'] = vi_price
+            else:  # 하락VI
+                self._stock_info['sell_price_modi'] = vi_price
+            
+            self._Write_Stock_Info()
         
     def _Stock_Signal_Notice(self, pValue):
         매도매수구분 = pValue[4] # 매도매수구분
@@ -164,7 +248,8 @@ class STRATEGY:
         체결시간 = pValue[11] #주식체결시간
         접수여부 = pValue[14] # 접수여부
         주문수량 = pValue[16] #주문수량
-        종목명 = pValue[18] # 체결종목명
+        # 종목명 = pValue[18] # 체결종목명
+        종목명 = self._stock_info['name']  # 종목명을 self._stock_info에서 가져옴
         
         # 매수
         if 매도매수구분 == '02': # 매수
